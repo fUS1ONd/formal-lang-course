@@ -1,6 +1,8 @@
+import cfpq_data
 import pytest
+from networkx import MultiDiGraph
 
-from project.finite_automata import regex_to_dfa
+from project.finite_automata import graph_to_nfa, regex_to_dfa
 
 
 @pytest.mark.parametrize(
@@ -58,3 +60,66 @@ def test_regex_to_dfa_symbol_is_whole_token():
 
     assert dfa.accepts(["abc"])
     assert not dfa.accepts(["a", "b", "c"])
+
+
+def build_graph(edges: list[tuple[int, int, str]]) -> MultiDiGraph:
+    graph = MultiDiGraph()
+    for source, target, label in edges:
+        graph.add_edge(source, target, label=label)
+    return graph
+
+
+def test_graph_to_nfa_uses_explicit_start_and_final():
+    graph = build_graph([(0, 1, "a"), (1, 2, "b"), (2, 0, "c")])
+
+    nfa = graph_to_nfa(graph, {0}, {2})
+
+    assert nfa.accepts(["a", "b"])
+    assert not nfa.accepts(["a"])
+    assert not nfa.accepts(["a", "b", "c"])
+
+
+def test_graph_to_nfa_empty_sets_mean_all_nodes():
+    graph = build_graph([(0, 1, "a"), (1, 2, "b")])
+
+    nfa = graph_to_nfa(graph, set(), set())
+
+    assert nfa.start_states == set(nfa.states) == nfa.final_states
+    # любой путь графа, включая пустой, теперь принимается
+    assert nfa.accepts([])
+    assert nfa.accepts(["b"])
+    assert nfa.accepts(["a", "b"])
+    assert not nfa.accepts(["b", "a"])
+
+
+def test_graph_to_nfa_keeps_cycles():
+    graph = cfpq_data.labeled_two_cycles_graph(2, 2, labels=("a", "b"))
+
+    nfa = graph_to_nfa(graph, {0}, {0})
+
+    assert nfa.accepts(["a"] * 3)
+    assert nfa.accepts(["b"] * 3)
+    assert nfa.accepts(["a", "a", "a", "b", "b", "b"])
+    assert not nfa.accepts(["a", "b"])
+
+
+def test_graph_to_nfa_handles_parallel_edges():
+    graph = build_graph([(0, 1, "a"), (0, 1, "a"), (0, 1, "b")])
+
+    nfa = graph_to_nfa(graph, {0}, {1})
+
+    assert nfa.accepts(["a"])
+    assert nfa.accepts(["b"])
+
+
+def test_graph_to_nfa_skips_edges_without_label():
+    graph = build_graph([(0, 1, "a")])
+    graph.add_edge(1, 2)
+
+    nfa = graph_to_nfa(graph, {0}, {2})
+
+    assert nfa.is_empty()
+
+
+def test_graph_to_nfa_empty_graph():
+    assert graph_to_nfa(MultiDiGraph(), set(), set()).is_empty()
