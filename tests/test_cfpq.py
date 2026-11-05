@@ -3,9 +3,12 @@ from networkx import MultiDiGraph
 from pyformlang.cfg import CFG, Terminal, Variable
 
 from project.cfpq import (
+    cfg_to_rsm,
     cfg_to_weak_normal_form,
+    ebnf_to_rsm,
     hellings_based_cfpq,
     matrix_based_cfpq,
+    tensor_based_cfpq,
 )
 
 
@@ -101,3 +104,30 @@ def test_matrix_grammar_without_productions_for_start():
     # стартовый нетерминал ничего не выводит
     graph = build_graph([(0, 1, "a")])
     assert matrix_based_cfpq(CFG.from_text("A -> a"), graph) == set()
+
+
+@pytest.mark.parametrize("edges", GRAPHS)
+@pytest.mark.parametrize("grammar_text", GRAMMARS)
+def test_tensor_matches_matrix(grammar_text, edges):
+    graph = build_graph(edges)
+    cfg = CFG.from_text(grammar_text)
+    assert tensor_based_cfpq(cfg_to_rsm(cfg), graph) == matrix_based_cfpq(cfg, graph)
+
+
+@pytest.mark.parametrize(
+    "grammar_text, expected",
+    [
+        # старт X, но продукции есть и у S
+        ("X -> a\nS -> b", {(0, 1)}),
+        # у стартового X нет продукций
+        ("S -> a", set()),
+    ],
+)
+def test_tensor_keeps_cfg_start_symbol(grammar_text, expected):
+    graph = build_graph([(0, 1, "a"), (1, 2, "b")])
+    cfg = CFG.from_text(grammar_text, start_symbol=Variable("X"))
+    assert tensor_based_cfpq(cfg_to_rsm(cfg), graph) == expected
+
+
+def test_tensor_empty_graph():
+    assert tensor_based_cfpq(ebnf_to_rsm("S -> a"), MultiDiGraph()) == set()
