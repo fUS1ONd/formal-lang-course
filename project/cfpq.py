@@ -268,3 +268,78 @@ def tensor_based_cfpq(
         for row, column in zip(*initial_matrix.nonzero())
         if row in graph_fa.start_indices and column in graph_fa.final_indices
     }
+
+
+def gll_based_cfpq(
+    rsm: RecursiveAutomaton,
+    graph: nx.DiGraph,
+    start_nodes: set[int] = None,
+    final_nodes: set[int] = None,
+) -> set[tuple[int, int]]:
+    """То же, что hellings_based_cfpq, но обход RSM по графу в духе GLL.
+
+    Дескриптор (состояние RSM, вершина графа, узел GSS) - точка разбора.
+    Узел GSS (нетерминал, вершина) - вызов бокса нетерминала из этой вершины,
+    его рёбра ведут к местам возврата: (состояние RSM после вызова, вызвавший узел).
+    """
+    nfa = graph_to_nfa(graph, start_nodes, final_nodes)
+    graph_edges = defaultdict(lambda: defaultdict(set))
+    for source, symbol, target in nfa:
+        graph_edges[source.value][symbol.value].add(target.value)
+
+    box_transitions = defaultdict(list)
+    box_starts, all_box_finals = defaultdict(set), set()
+    for label, box in rsm.boxes.items():
+        for source, symbol, target in box.dfa:
+            box_transitions[(label, source)].append((symbol.value, (label, target)))
+        box_starts[label] = {(label, state) for state in box.dfa.start_states}
+        all_box_finals |= {(label, state) for state in box.dfa.final_states}
+    label_by_name = {label.value: label for label in rsm.boxes}
+
+    return_points = defaultdict(set)
+    # узел GSS -> вершины графа, в которых бокс уже завершился
+    popped = defaultdict(set)
+    visited = set()
+    worklist = []
+
+    def add_descriptor(rsm_state, node, gss_node) -> None:
+        descriptor = (rsm_state, node, gss_node)
+        if descriptor not in visited:
+            visited.add(descriptor)
+            worklist.append(descriptor)
+
+    roots = {(rsm.initial_label, state.value) for state in nfa.start_states}
+    for root in roots:
+        _, start_node = root
+        for rsm_state in box_starts[rsm.initial_label]:
+            add_descriptor(rsm_state, start_node, root)
+
+    while worklist:
+        rsm_state, node, gss_node = worklist.pop()
+        if rsm_state in all_box_finals and node not in popped[gss_node]:
+            popped[gss_node].add(node)
+            for return_state, caller in return_points[gss_node]:
+                add_descriptor(return_state, node, caller)
+        for symbol, next_state in box_transitions[rsm_state]:
+            if symbol in label_by_name:
+                callee_label = label_by_name[symbol]
+                callee = (callee_label, node)
+                return_point = (next_state, gss_node)
+                if return_point not in return_points[callee]:
+                    return_points[callee].add(return_point)
+                    # вызов мог завершиться раньше, чем появилась эта точка возврата
+                    for end_node in popped[callee]:
+                        add_descriptor(next_state, end_node, gss_node)
+                for start_state in box_starts[callee_label]:
+                    add_descriptor(start_state, node, callee)
+            else:
+                for target in graph_edges[node][symbol]:
+                    add_descriptor(next_state, target, gss_node)
+
+    final_values = {state.value for state in nfa.final_states}
+    return {
+        (start, end)
+        for _, start in roots
+        for end in popped[(rsm.initial_label, start)]
+        if end in final_values
+    }
