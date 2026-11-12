@@ -2,8 +2,11 @@ from collections import defaultdict
 
 import networkx as nx
 from pyformlang.cfg import CFG, Epsilon, Production, Terminal, Variable
+from pyformlang.finite_automaton import NondeterministicFiniteAutomaton, State, Symbol
+from pyformlang.rsa import Box, RecursiveAutomaton
 from scipy.sparse import coo_array, csr_array
 
+from project.adjacency_matrix_fa import AdjacencyMatrixFA, intersect_automata
 from project.finite_automata import graph_to_nfa
 
 
@@ -157,4 +160,111 @@ def matrix_based_cfpq(
         (states[row].value, states[column].value)
         for row, column in zip(*matrices[wcnf.start_symbol].nonzero())
         if row in start_indices and column in final_indices
+    }
+
+
+def ebnf_to_rsm(ebnf: str) -> RecursiveAutomaton:
+    """Строит RSM по грамматике в EBNF со стартовым нетерминалом S.
+
+    Каждая строка - "A -> регулярное выражение", строки с одной головой
+    объединяются через "|".
+    """
+    return RecursiveAutomaton.from_text(ebnf)
+
+
+def cfg_to_rsm(cfg: CFG) -> RecursiveAutomaton:
+    """Строит RSM по КС грамматике.
+
+    Тело продукции - частный случай регулярного выражения,
+    поэтому текст грамматики разбирается как EBNF.
+    """
+    start_symbol = Symbol(cfg.start_symbol.value)
+    if all(production.head != cfg.start_symbol for production in cfg.productions):
+        # from_text не создаёт бокс для нетерминала без продукций,
+        # поэтому стартовому даём пустой бокс: из него ничего не выводится
+        return RecursiveAutomaton(
+            initial_label=start_symbol, boxes={Box(label=start_symbol)}
+        )
+    return RecursiveAutomaton.from_text(cfg.to_text(), start_symbol)
+
+
+def _rsm_to_adjacency_matrix_fa(
+    rsm: RecursiveAutomaton,
+) -> tuple[AdjacencyMatrixFA, dict[Symbol, tuple[set[int], set[int]]]]:
+    """Склеивает боксы RSM в один автомат с состояниями (нетерминал, состояние бокса).
+
+    Возвращает автомат и для каждого нетерминала индексы стартовых
+    и финальных состояний его бокса.
+    """
+    nfa = NondeterministicFiniteAutomaton()
+    for label, box in rsm.boxes.items():
+        for source, symbol, target in box.dfa:
+            nfa.add_transition(State((label, source)), symbol, State((label, target)))
+        # регистрируем и состояния без переходов, например старт бокса для S -> $
+        for start_state in box.dfa.start_states:
+            nfa.add_start_state(State((label, start_state)))
+        for final_state in box.dfa.final_states:
+            nfa.add_final_state(State((label, final_state)))
+
+    rsm_fa = AdjacencyMatrixFA(nfa)
+
+    def box_indices(label: Symbol, box_states: set[State]) -> set[int]:
+        return {rsm_fa.state_to_index[State((label, state))] for state in box_states}
+
+    box_bounds = {
+        label: (
+            box_indices(label, box.dfa.start_states),
+            box_indices(label, box.dfa.final_states),
+        )
+        for label, box in rsm.boxes.items()
+    }
+    return rsm_fa, box_bounds
+
+
+def tensor_based_cfpq(
+    rsm: RecursiveAutomaton,
+    graph: nx.DiGraph,
+    start_nodes: set[int] = None,
+    final_nodes: set[int] = None,
+) -> set[tuple[int, int]]:
+    """То же, что hellings_based_cfpq, но грамматика задана RSM.
+
+    Пересекаем RSM с графом через тензорное произведение. Если в замыкании
+    пересечения из (старт бокса N, u) достижимо (финал бокса N, v), то из N
+    выводится слово на пути из u в v: добавляем в граф ребро u -N-> v
+    и повторяем, пока граф растёт.
+    """
+    rsm_fa, box_bounds = _rsm_to_adjacency_matrix_fa(rsm)
+    graph_fa = AdjacencyMatrixFA(graph_to_nfa(graph, start_nodes, final_nodes))
+    nodes_count = len(graph_fa.states)
+
+    def node_block(rsm_index: int) -> slice:
+        # intersect_automata кладёт пару (q, v) в индекс q * |V| + v
+        return slice(rsm_index * nodes_count, (rsm_index + 1) * nodes_count)
+
+    for label in box_bounds:
+        graph_fa.matrices.setdefault(
+            label, csr_array((nodes_count, nodes_count), dtype=bool)
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        closure = intersect_automata(rsm_fa, graph_fa).transitive_closure()
+        for label, (box_starts, box_finals) in box_bounds.items():
+            derived = graph_fa.matrices[label]
+            for box_start in box_starts:
+                for box_final in box_finals:
+                    derived = (
+                        derived + closure[node_block(box_start), node_block(box_final)]
+                    )
+            if derived.nnz != graph_fa.matrices[label].nnz:
+                graph_fa.matrices[label] = derived
+                changed = True
+
+    initial_matrix = graph_fa.matrices[rsm.initial_label]
+    return {
+        (graph_fa.states[row].value, graph_fa.states[column].value)
+        for row, column in zip(*initial_matrix.nonzero())
+        if row in graph_fa.start_indices and column in graph_fa.final_indices
     }
