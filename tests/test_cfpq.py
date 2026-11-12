@@ -6,6 +6,7 @@ from project.cfpq import (
     cfg_to_rsm,
     cfg_to_weak_normal_form,
     ebnf_to_rsm,
+    gll_based_cfpq,
     hellings_based_cfpq,
     matrix_based_cfpq,
     tensor_based_cfpq,
@@ -131,3 +132,36 @@ def test_tensor_keeps_cfg_start_symbol(grammar_text, expected):
 
 def test_tensor_empty_graph():
     assert tensor_based_cfpq(ebnf_to_rsm("S -> a"), MultiDiGraph()) == set()
+
+
+@pytest.mark.parametrize("edges", GRAPHS)
+@pytest.mark.parametrize("grammar_text", GRAMMARS)
+def test_gll_matches_hellings(grammar_text, edges):
+    graph = build_graph(edges)
+    cfg = CFG.from_text(grammar_text)
+    assert gll_based_cfpq(cfg_to_rsm(cfg), graph) == hellings_based_cfpq(cfg, graph)
+
+
+def test_gll_left_recursion_respects_start_and_final_nodes():
+    graph = build_graph([(0, 1, "a"), (1, 2, "a"), (2, 3, "a")])
+    rsm = cfg_to_rsm(CFG.from_text("S -> S a | a"))
+    assert gll_based_cfpq(rsm, graph, {0, 1}, {3}) == {(0, 3), (1, 3)}
+
+
+@pytest.mark.parametrize(
+    "grammar_text, expected",
+    [
+        # старт X, но продукции есть и у S
+        ("X -> a\nS -> b", {(0, 1)}),
+        # у стартового X нет продукций
+        ("S -> a", set()),
+    ],
+)
+def test_gll_keeps_cfg_start_symbol(grammar_text, expected):
+    graph = build_graph([(0, 1, "a"), (1, 2, "b")])
+    cfg = CFG.from_text(grammar_text, start_symbol=Variable("X"))
+    assert gll_based_cfpq(cfg_to_rsm(cfg), graph) == expected
+
+
+def test_gll_empty_graph():
+    assert gll_based_cfpq(ebnf_to_rsm("S -> a"), MultiDiGraph()) == set()
